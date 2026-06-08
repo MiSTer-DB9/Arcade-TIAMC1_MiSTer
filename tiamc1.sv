@@ -165,8 +165,12 @@ module emu
 	// 1 - D-/TX
 	// 2..6 - USR2..USR6
 	// Set USER_OUT to 1 to read from USER_IN.
-	input   [6:0] USER_IN,
-	output  [6:0] USER_OUT,
+	// [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: USER_OSD + per-pin push-pull mask, USER_IO widened to 8 bits
+	output        USER_OSD,
+	output  [7:0] USER_PP,
+	input   [7:0] USER_IN,
+	output  [7:0] USER_OUT,
+	// [MiSTer-DB9 END]
 
 	input         OSD_STATUS
 );
@@ -175,7 +179,9 @@ module emu
 ///////// Default values for ports not used in this core /////////
 
 assign ADC_BUS  = 'Z;
-//assign USER_OUT = '1;
+// [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: USER_PP driven by wrapper; USER_OUT driven by joydb (USER_OUT_DRIVE) below
+assign USER_PP = USER_PP_DRIVE;
+// [MiSTer-DB9 END]
 assign {UART_RTS, UART_TXD, UART_DTR} = 0;
 assign {SD_SCK, SD_MOSI, SD_CS} = 'Z;
 assign {SDRAM_DQ, SDRAM_A, SDRAM_BA, SDRAM_CLK, SDRAM_CKE, SDRAM_DQML, SDRAM_DQMH, SDRAM_nWE, SDRAM_nCAS, SDRAM_nRAS, SDRAM_nCS} = 'Z;
@@ -217,16 +223,25 @@ localparam CONF_STR = {
 	"O56,Analog Input,Joystick,Paddle,Spinner;",
 	"O7,Invert Axis,Yes,No;",
 	"-;",
+	// [MiSTer-DB9-Pro BEGIN] - Saturn-first joy_type (canonical bit notation)
+	"O[127:126],UserIO Joystick,Off,Saturn,DB9MD,DB15;",
+	"O[125],UserIO Players, 1 Player,2 Players;",
+	// [MiSTer-DB9-Pro END]
+	"-;",
 	"T0,Reset;",
 	"R0,Reset and close OSD;",
 	"J1,Button 1,Button 2,Coin/Start;",
-	"V,v",`BUILD_DATE 
+	"V,v",`BUILD_DATE
 };
 
 wire forced_scandoubler;
 wire  [1:0] buttons;
-wire [31:0] status;
-wire [31:0] joystick_0;
+// [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: widen status to 128 bits (joy_type at [127:126], joy_2p at [125])
+wire [127:0] status;
+// [MiSTer-DB9 END]
+// [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: rename USB joystick wire
+wire [31:0] joystick_0_USB;
+// [MiSTer-DB9 END]
 wire [15:0] joystick_analog_0;
 wire [7:0]  paddle_0;
 wire [8:0]  spinner_0;
@@ -235,6 +250,71 @@ wire        ioctl_wr;
 wire [24:0] ioctl_addr;
 wire  [7:0] ioctl_dout;
 wire  [7:0] ioctl_index;
+
+// [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: joydb wrapper
+wire         CLK_JOY = CLK_50M;                 // Assign clock between 40-50Mhz
+wire   [1:0] joy_type_raw    = status[127:126]; // 0=Off, 1=Saturn, 2=DB9MD, 3=DB15
+wire         joy_2p          = status[125];
+// SNAC cores: replace 1'b0 with the core's SNAC enable expression so SNAC
+// preempts the joydb wrapper on shared USER_IO pins. Default 1'b0 is no-op.
+wire         snac_active     = 1'b0;
+// MT32-pi cores on primary USER_IO: replace 1'b0 with the core's MT32-active
+// expression. Default 1'b0 (no MT32 on this core).
+wire         mt32_primary_active = 1'b0;
+wire   [1:0] joy_type        = snac_active ? 2'd0 : joy_type_raw;
+wire         joy_db9md_en    = (joy_type == 2'd2);
+wire         joy_db15_en     = (joy_type == 2'd3);
+wire         joy_any_en      = |joy_type;
+// [MiSTer-DB9 END]
+
+// [MiSTer-DB9-Pro BEGIN] - Saturn key gate
+wire         saturn_unlocked;                   // driven by hps_io UIO_DB9_KEY (0xFE)
+// [MiSTer-DB9-Pro END]
+
+// [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: joydb wrapper wires + instance
+wire   [7:0] USER_OUT_DRIVE;
+wire   [7:0] USER_PP_DRIVE;
+wire  [15:0] joydb_1, joydb_2;
+wire         joydb_1ena, joydb_2ena;
+wire  [15:0] joy_raw_payload;
+
+joydb joydb (
+  .clk             ( CLK_JOY         ),
+  .USER_IN         ( USER_IN         ),
+  .OSD_STATUS          ( OSD_STATUS          ),
+  .snac_active         ( snac_active         ),
+  .mt32_primary_active ( mt32_primary_active ),
+  .joy_type        ( joy_type        ),
+  .joy_2p          ( joy_2p          ),
+  .saturn_unlocked ( saturn_unlocked ),
+  .USER_OUT_DRIVE  ( USER_OUT_DRIVE  ),
+  .USER_PP_DRIVE   ( USER_PP_DRIVE   ),
+  .USER_OSD        ( USER_OSD        ),
+  .joydb_1         ( joydb_1         ),
+  .joydb_2         ( joydb_2         ),
+  .joydb_1ena      ( joydb_1ena      ),
+  .joydb_2ena      ( joydb_2ena      ),
+  .joy_raw         ( joy_raw_payload )
+);
+
+assign USER_OUT = USER_OUT_DRIVE;
+// [MiSTer-DB9 END]
+
+// [MiSTer-DB9-Pro BEGIN] - DB controllers muted while OSD is open; remap joydb bits to TIA-MC1 order
+// TIA-MC1 consumer order (CONF_STR "J1,Button 1,Button 2,Coin/Start", 1 player):
+//   [3:0]=R/L/D/U  [4]=Button 1  [5]=Button 2  [6]=Coin/Start
+// Single-player core (only joystick_0 is read); each DB9 port maps to joystick_0.
+// joydb_1 source bits: [3:0]=R/L/D/U [4]=A [5]=B [6]=C [10]=Start [11]=Mode/R
+// 2-button + 4-way core => Rule 1 (3-button MD playable). Coin/Start slot uses
+// the chord joydb_1[11] | (joydb_1[10] & joydb_1[5]) so a 3-button MD pad can
+// reach Coin/Start via Start+B as well as Mode/Select alone.
+//   Button 1   <- joydb_1[4]  (A)
+//   Button 2   <- joydb_1[5]  (B)
+//   Coin/Start <- joydb_1[11] | (joydb_1[10] & joydb_1[5])  (Mode/Select OR Start+B)
+wire [31:0] joystick_0 = joydb_1ena ? (OSD_STATUS ? 32'b0 : {25'b0, joydb_1[11] | (joydb_1[10] & joydb_1[5]), joydb_1[5:0]})
+                       : joydb_2ena ? (OSD_STATUS ? 32'b0 : {25'b0, joydb_2[11] | (joydb_2[10] & joydb_2[5]), joydb_2[5:0]})
+                       : joystick_0_USB;
+// [MiSTer-DB9-Pro END]
 
 hps_io #(.CONF_STR(CONF_STR)) hps_io
 (
@@ -248,16 +328,22 @@ hps_io #(.CONF_STR(CONF_STR)) hps_io
 	.buttons(buttons),
 	.status(status),
 	.status_menumask({status[5]}),
-	
-	.joystick_0(joystick_0),
+
+	.joystick_0(joystick_0_USB),
 	.joystick_l_analog_0(joystick_analog_0),
 	.paddle_0(paddle_0),
 	.spinner_0(spinner_0),
-	
+
 	.ioctl_wr(ioctl_wr),
 	.ioctl_addr(ioctl_addr),
 	.ioctl_dout(ioctl_dout),
-	.ioctl_index(ioctl_index)
+	.ioctl_index(ioctl_index),
+	// [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: joy_raw
+	.joy_raw(OSD_STATUS ? joy_raw_payload : 16'b0),
+	// [MiSTer-DB9 END]
+	// [MiSTer-DB9-Pro BEGIN] - Saturn key gate
+	.saturn_unlocked(saturn_unlocked)
+	// [MiSTer-DB9-Pro END]
 );
 
 ///////////////////////   CLOCKS   ///////////////////////////////
@@ -321,9 +407,13 @@ tiamc1 tiamc1
 	.LED_USER(LED_USER),
 	.LED_POWER(LED_POWER),
 	.LED_DISK(LED_DISK),
-	
-	.USER_OUT(USER_OUT),
-	
+
+	// [MiSTer-DB9 BEGIN] - DB9/SNAC8 support: top-level USER_OUT is driven by the
+	// joydb wrapper (USER_OUT_DRIVE); the core only drove a constant on this port,
+	// so leave its USER_OUT output unconnected.
+	.USER_OUT(),
+	// [MiSTer-DB9 END]
+
 	.dn_addr(ioctl_addr[19:0]),
 	.dn_data(ioctl_dout),
 	.dn_wr(ioctl_wr && !ioctl_index),
