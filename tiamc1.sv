@@ -325,8 +325,8 @@ assign USER_OUT = USER_OUT_DRIVE;
 //   Button 1   <- joydb_1[4]  (A)
 //   Button 2   <- joydb_1[5]  (B)
 //   Coin/Start <- joydb_1[11] | (joydb_1[10] & joydb_1[5])  (Mode/Select OR Start+B)
-wire [31:0] joystick_0 = joydb_1ena ? (OSD_STATUS ? 32'b0 : {25'b0, joydb_1[11] | (joydb_1[10] & joydb_1[5]), joydb_1[5:0]})
-                       : joydb_2ena ? (OSD_STATUS ? 32'b0 : {25'b0, joydb_2[11] | (joydb_2[10] & joydb_2[5]), joydb_2[5:0]})
+wire [31:0] joystick_0 = joydb_1ena ? (OSD_STATUS ? 32'b0 : joydb_1_mapped[6:0])
+                       : joydb_2ena ? (OSD_STATUS ? 32'b0 : joydb_2_mapped[6:0])
                        : joystick_0_USB;
 // [MiSTer-DB9-Pro END]
 
